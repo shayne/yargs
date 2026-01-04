@@ -440,6 +440,28 @@ func extractFlagTypes(structValue reflect.Value) map[string]reflect.Kind {
 	return flags
 }
 
+// extractFlagAliases returns a map of short flag names to their long names.
+func extractFlagAliases(structValue reflect.Value) map[string]string {
+	aliases := make(map[string]string)
+	if structValue.Kind() != reflect.Struct {
+		return aliases
+	}
+
+	t := structValue.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		flagName := field.Tag.Get("flag")
+		if flagName == "" {
+			flagName = strings.ToLower(field.Name)
+		}
+		shortName := field.Tag.Get("short")
+		if shortName != "" {
+			aliases[shortName] = flagName
+		}
+	}
+	return aliases
+}
+
 // Parser represents a parsed command line.
 type Parser struct {
 	// SubCommand is the sub-command name (first non-flag argument)
@@ -545,6 +567,37 @@ func parse(args []string, flagTypes map[string]reflect.Kind, validFlags map[stri
 	}
 
 	return p, nil
+}
+
+func mergeAliasFlags(flags map[string]string, aliases map[string]string, flagTypes map[string]reflect.Kind) {
+	if len(aliases) == 0 {
+		return
+	}
+	for short, long := range aliases {
+		shortVal, ok := flags[short]
+		if !ok {
+			continue
+		}
+		kind := flagTypes[long]
+		if kind == reflect.Slice {
+			if longVal, ok := flags[long]; ok {
+				if shortVal != "" {
+					if longVal == "" {
+						flags[long] = shortVal
+					} else {
+						flags[long] = longVal + "," + shortVal
+					}
+				}
+			} else {
+				flags[long] = shortVal
+			}
+		} else {
+			if _, ok := flags[long]; !ok {
+				flags[long] = shortVal
+			}
+		}
+		delete(flags, short)
+	}
 }
 
 // KnownFlagsOptions controls how ParseKnownFlags handles slices.
@@ -1780,12 +1833,14 @@ func ParseFlags[T any](args []string) (*ParseResult[T], error) {
 	var flags T
 	flagTypes := extractFlagTypes(reflect.ValueOf(flags))
 	validFlags := extractFlagNames(reflect.ValueOf(flags))
+	aliases := extractFlagAliases(reflect.ValueOf(flags))
 
 	// ParseFlags is for simple programs without subcommands - all non-flag args are positional
 	p, err := parse(args, flagTypes, validFlags, false)
 	if err != nil {
 		return nil, err
 	}
+	mergeAliasFlags(p.Flags, aliases, flagTypes)
 	if err := populateStruct(reflect.ValueOf(&flags).Elem(), p.Flags); err != nil {
 		return nil, err
 	}
@@ -1829,6 +1884,8 @@ func ParseWithCommand[G any, S any, A any](args []string) (*TypedParseResult[G, 
 	subCmdFlagNames := extractFlagNames(reflect.ValueOf(subCmdFlags))
 	globalFlagTypes := extractFlagTypes(reflect.ValueOf(globalFlags))
 	subCmdFlagTypes := extractFlagTypes(reflect.ValueOf(subCmdFlags))
+	globalAliases := extractFlagAliases(reflect.ValueOf(globalFlags))
+	subCmdAliases := extractFlagAliases(reflect.ValueOf(subCmdFlags))
 
 	// Combine type maps for lookup during parsing
 	allFlagTypes := make(map[string]reflect.Kind)
@@ -1860,6 +1917,14 @@ func ParseWithCommand[G any, S any, A any](args []string) (*TypedParseResult[G, 
 	if err != nil {
 		return nil, err
 	}
+	aliases := make(map[string]string, len(globalAliases)+len(subCmdAliases))
+	for short, long := range globalAliases {
+		aliases[short] = long
+	}
+	for short, long := range subCmdAliases {
+		aliases[short] = long
+	}
+	mergeAliasFlags(p.Flags, aliases, allFlagTypes)
 
 	// Categorize the parsed flags into GlobalFlags and SubCommandFlags
 	p.GlobalFlags = make(map[string]string)

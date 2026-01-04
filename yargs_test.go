@@ -2523,6 +2523,36 @@ func TestChaosMonkey_UnsupportedTypes(t *testing.T) {
 		}
 	})
 
+	t.Run("slice short flag repeats accumulate", func(t *testing.T) {
+		type Flags struct {
+			Publish []string `flag:"publish" short:"p"`
+		}
+
+		result, err := ParseFlags[Flags]([]string{"-p", "3000:3000", "-p", "4000:4000"})
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		want := []string{"3000:3000", "4000:4000"}
+		if !reflect.DeepEqual(result.Flags.Publish, want) {
+			t.Errorf("Publish = %v, want %v", result.Flags.Publish, want)
+		}
+	})
+
+	t.Run("slice short and long flags merge", func(t *testing.T) {
+		type Flags struct {
+			Publish []string `flag:"publish" short:"p"`
+		}
+
+		result, err := ParseFlags[Flags]([]string{"--publish=1000:1000", "-p", "2000:2000"})
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		want := []string{"1000:1000", "2000:2000"}
+		if !reflect.DeepEqual(result.Flags.Publish, want) {
+			t.Errorf("Publish = %v, want %v", result.Flags.Publish, want)
+		}
+	})
+
 	t.Run("unsupported field type - map", func(t *testing.T) {
 		type Flags struct {
 			Data map[string]string `flag:"data"`

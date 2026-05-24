@@ -1268,6 +1268,90 @@ func GenerateGroupHelp[G any](config HelpConfig, groupName string, globalFlagsEx
 	return b.String()
 }
 
+func formatGroupCommandUsage(commandName, groupName, cmdName, usage string) string {
+	prefix := fmt.Sprintf("%s [GLOBAL OPTIONS] ", commandName)
+	groupCommand := groupName + " " + cmdName
+	usage = strings.TrimSpace(usage)
+	if usage == "" {
+		return prefix + groupCommand + " [ARGS...]"
+	}
+	if usage == commandName || strings.HasPrefix(usage, commandName+" ") {
+		return usage
+	}
+	if usage == groupCommand || strings.HasPrefix(usage, groupCommand+" ") {
+		return prefix + usage
+	}
+	if usage == cmdName || strings.HasPrefix(usage, cmdName+" ") {
+		return prefix + groupName + " " + usage
+	}
+	return prefix + groupCommand + " " + usage
+}
+
+func groupCommandInfo(config HelpConfig, groupName, cmdName string) (SubCommandInfo, bool) {
+	group, ok := config.Groups[groupName]
+	if !ok {
+		return SubCommandInfo{}, false
+	}
+	cmd, ok := group.Commands[cmdName]
+	return cmd, ok
+}
+
+// GenerateGroupCommandHelp generates help for a specific command inside a group.
+func GenerateGroupCommandHelp[G any](config HelpConfig, groupName, cmdName string, globalFlagsExample G) string {
+	cmd, ok := groupCommandInfo(config, groupName, cmdName)
+	if !ok {
+		return fmt.Sprintf("Unknown command: %s %s\n", groupName, cmdName)
+	}
+
+	var b strings.Builder
+	if cmd.Description != "" {
+		b.WriteString(cmd.Description)
+		b.WriteString("\n\n")
+	}
+	if len(cmd.Aliases) > 0 {
+		b.WriteString("ALIASES:\n")
+		b.WriteString(fmt.Sprintf("    %s\n\n", strings.Join(cmd.Aliases, ", ")))
+	}
+
+	b.WriteString("USAGE:\n")
+	b.WriteString(fmt.Sprintf("    %s\n\n", formatGroupCommandUsage(config.Command.Name, groupName, cmdName, cmd.Usage)))
+
+	globalFlags := extractFlagInfo(reflect.TypeOf(globalFlagsExample))
+	if len(globalFlags) > 0 {
+		b.WriteString("GLOBAL OPTIONS:\n")
+		for _, flag := range globalFlags {
+			var flagStr string
+			if flag.ShortName != "" {
+				flagStr = fmt.Sprintf("    -%s, --%s", flag.ShortName, flag.Name)
+			} else {
+				flagStr = fmt.Sprintf("    --%s", flag.Name)
+			}
+
+			if flag.Description != "" {
+				b.WriteString(fmt.Sprintf("%-28s %s", flagStr, flag.Description))
+			} else {
+				b.WriteString(flagStr)
+			}
+
+			if flag.DefaultVal != "" {
+				b.WriteString(fmt.Sprintf(" (default: %s)", flag.DefaultVal))
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if len(cmd.Examples) > 0 {
+		b.WriteString("EXAMPLES:\n")
+		for _, example := range cmd.Examples {
+			b.WriteString(fmt.Sprintf("    %s\n", example))
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
 // GenerateSubCommandHelp generates and prints help for a specific subcommand.
 func GenerateSubCommandHelp[G any, S any, A any](config HelpConfig, subCmdName string, globalFlagsExample G, subCmdFlagsExample S, argsExample A) string {
 	subCmd, ok := config.SubCommands[subCmdName]
@@ -1665,6 +1749,66 @@ func GenerateGroupHelpLLM[G any](config HelpConfig, groupName string, globalFlag
 				}
 				b.WriteString(fmt.Sprintf("Get detailed help: `%s %s %s --help-llm`\n\n", config.Command.Name, groupName, name))
 			}
+		}
+	}
+
+	return b.String()
+}
+
+// GenerateGroupCommandHelpLLM generates LLM-optimized help for a specific command inside a group.
+func GenerateGroupCommandHelpLLM[G any](config HelpConfig, groupName, cmdName string, globalFlagsExample G) string {
+	cmd, ok := groupCommandInfo(config, groupName, cmdName)
+	if !ok {
+		return fmt.Sprintf("# Unknown Command: %s %s\n\nCommand not found.\n", groupName, cmdName)
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# %s %s %s\n\n", config.Command.Name, groupName, cmdName))
+
+	if cmd.Description != "" {
+		b.WriteString(cmd.Description)
+		b.WriteString("\n\n")
+	}
+	if cmd.LLMInstructions != "" {
+		b.WriteString("## LLM Instructions\n\n")
+		b.WriteString(cmd.LLMInstructions)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("## Usage\n\n")
+	b.WriteString("```\n")
+	b.WriteString(formatGroupCommandUsage(config.Command.Name, groupName, cmdName, cmd.Usage))
+	b.WriteString("\n```\n\n")
+
+	globalFlags := extractFlagInfo(reflect.TypeOf(globalFlagsExample))
+	if len(globalFlags) > 0 {
+		b.WriteString("## Global Options\n\n")
+		for _, flag := range globalFlags {
+			b.WriteString("### `--")
+			b.WriteString(flag.Name)
+			b.WriteString("`")
+			if flag.ShortName != "" {
+				b.WriteString(fmt.Sprintf(" (short: `-%s`)", flag.ShortName))
+			}
+			b.WriteString("\n\n")
+
+			if flag.Description != "" {
+				b.WriteString(flag.Description)
+				b.WriteString("\n\n")
+			}
+
+			b.WriteString(fmt.Sprintf("- **Type**: `%s`\n", flag.Type))
+			if flag.DefaultVal != "" {
+				b.WriteString(fmt.Sprintf("- **Default**: `%s`\n", flag.DefaultVal))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	if len(cmd.Examples) > 0 {
+		b.WriteString("## Examples\n\n")
+		for _, example := range cmd.Examples {
+			b.WriteString(fmt.Sprintf("```\n%s\n```\n\n", example))
 		}
 	}
 
@@ -2174,6 +2318,17 @@ func helpFlagsInArgs(args []string) (help bool, helpLLM bool) {
 	return help, helpLLM
 }
 
+func groupedHelpTargets(args []string) (groupHelp bool, groupHelpLLM bool, commandHelp bool, commandHelpLLM bool) {
+	indices := findNonFlagArgs(args)
+	if len(indices) < 2 {
+		groupHelp, groupHelpLLM = helpFlagsInArgs(args)
+		return groupHelp, groupHelpLLM, false, false
+	}
+	groupHelp, groupHelpLLM = helpFlagsInArgs(args[indices[0]+1 : indices[1]])
+	commandHelp, commandHelpLLM = helpFlagsInArgs(args[indices[1]+1:])
+	return groupHelp, groupHelpLLM, commandHelp, commandHelpLLM
+}
+
 // stripFirstNonFlagArg removes the first non-flag argument from args.
 // This is used for grouped commands to strip the group name before passing to handlers.
 // The "help" check ensures that "help docker" doesn't strip "docker" from the args.
@@ -2286,21 +2441,27 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 	if first != "" && second != "" {
 		// Check if first arg is a group
 		if grp, isGroup := groups[first]; isGroup {
-			// Check if help is requested
-			for _, arg := range args[1:] {
-				if arg == helpFlagLLM {
+			groupHelp, groupHelpLLM, commandHelp, commandHelpLLM := groupedHelpTargets(args)
+			if groupHelp || groupHelpLLM {
+				if groupHelpLLM {
 					fmt.Print(GenerateGroupHelpLLM(config, first, globalFlagsExample))
 					return nil
 				}
-				if isHelpFlag(arg) {
-					fmt.Print(GenerateGroupHelp(config, first, globalFlagsExample))
-					return nil
-				}
+				fmt.Print(GenerateGroupHelp(config, first, globalFlagsExample))
+				return nil
 			}
 			// Route to subcommand within group
 			handler, ok := grp.Commands[second]
 			if !ok {
 				return fmt.Errorf("unknown command in group '%s': %s\nRun '%s %s' for usage", first, second, config.Command.Name, first)
+			}
+			if commandHelp || commandHelpLLM {
+				if commandHelpLLM {
+					fmt.Print(GenerateGroupCommandHelpLLM(config, first, second, globalFlagsExample))
+					return nil
+				}
+				fmt.Print(GenerateGroupCommandHelp(config, first, second, globalFlagsExample))
+				return nil
 			}
 			// Strip the group name from args before passing to handler
 			// e.g., ["docker", "run", "nginx"] -> ["run", "nginx"]

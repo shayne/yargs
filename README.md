@@ -232,6 +232,7 @@ Yargs can emit human help or LLM-optimized help from the same metadata.
 
 - Global: `GenerateGlobalHelp`
 - Group: `GenerateGroupHelp`
+- Group command: `GenerateGroupCommandHelp`
 - Subcommand: `GenerateSubCommandHelp`
 - Dispatcher: `RunSubcommands` and `RunSubcommandsWithGroups`
 
@@ -239,6 +240,7 @@ Yargs can emit human help or LLM-optimized help from the same metadata.
 
 - Global: `GenerateGlobalHelpLLM`
 - Group: `GenerateGroupHelpLLM`
+- Group command: `GenerateGroupCommandHelpLLM`
 - Subcommand: `GenerateSubCommandHelpLLM`
 - Flags: `--help-llm`
 

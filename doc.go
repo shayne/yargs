@@ -3,12 +3,13 @@
 // license that can be found in the LICENSE file.
 
 // Package yargs provides a flexible, type-safe command-line argument parser with
-// automatic help generation.
+// automatic human help and agent-readable CLI context.
 //
 // The library is designed for building CLIs with subcommands and follows these principles:
 //   - Type-safe flag parsing using Go generics
 //   - Zero boilerplate for common use cases
 //   - Automatic help generation from struct tags
+//   - Agent-readable context for automation tools via --help-agent
 //   - Flags can appear anywhere in the command line
 //   - Consistent and predictable parsing behavior
 //
@@ -39,8 +40,8 @@
 //	    Detach bool `flag:"detach" short:"d" help:"Run in background"`
 //	}
 //
-//	func handleRun(args []string) error {
-//	    result, err := yargs.ParseAndHandleHelp[GlobalFlags, RunFlags](args, helpConfig)
+//	func handleRun(ctx context.Context, args []string) error {
+//	    result, err := yargs.ParseAndHandleHelp[GlobalFlags, RunFlags, struct{}](args, helpConfig)
 //	    if errors.Is(err, yargs.ErrShown) {
 //	        return nil
 //	    }
@@ -55,11 +56,32 @@
 //	    handlers := map[string]yargs.SubcommandHandler{
 //	        "run": handleRun,
 //	    }
-//	    if err := yargs.RunSubcommands(os.Args[1:], helpConfig, GlobalFlags{}, handlers); err != nil {
+//	    if err := yargs.RunSubcommands(context.Background(), os.Args[1:], helpConfig, GlobalFlags{}, handlers); err != nil {
 //	        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 //	        os.Exit(1)
 //	    }
 //	}
+//
+// # Agent Help
+//
+// CLIs can expose structured context for automation agents with --help-agent.
+// Agent help is generated from the same command metadata and struct schemas as
+// human help, with optional AgentInfo guidance for operating rules, discovery,
+// and safety notes.
+//
+//	helpConfig := yargs.HelpConfig{
+//	    Command: yargs.CommandInfo{
+//	        Name:        "app",
+//	        Description: "Manage app services",
+//	        Agent: yargs.AgentInfo{
+//	            Summary: "Use app to inspect and operate services.",
+//	            Rules:   []string{"Prefer --json when parsing output."},
+//	            Safety:  []string{"Do not delete services unless explicitly asked."},
+//	        },
+//	    },
+//	}
+//
+//	fmt.Print(yargs.GenerateAgentHelp(helpConfig, GlobalFlags{}))
 //
 // # Flag Syntax
 //
@@ -99,7 +121,12 @@
 // # Command Registry and Introspection
 //
 // Use Registry to declare command schemas once and resolve commands without
-// hardcoded lists. This is useful for checking positional requirements.
+// hardcoded lists. This is useful for checking positional requirements and for
+// generating schema-aware agent help.
+//
+//	type RunFlags struct {
+//	    Detach bool `flag:"detach" help:"Run in background"`
+//	}
 //
 //	type RunArgs struct {
 //	    Service string `pos:"0" help:"Service name"`
@@ -113,7 +140,11 @@
 //	reg := yargs.Registry{
 //	    Command: yargs.CommandInfo{Name: "app"},
 //	    SubCommands: map[string]yargs.CommandSpec{
-//	        "run": {Info: yargs.SubCommandInfo{Name: "run"}, ArgsSchema: RunArgs{}},
+//	        "run": {
+//	            Info:        yargs.SubCommandInfo{Name: "run"},
+//	            FlagsSchema: RunFlags{},
+//	            ArgsSchema:  RunArgs{},
+//	        },
 //	        "status": {Info: yargs.SubCommandInfo{Name: "status"}, ArgsSchema: StatusArgs{}},
 //	    },
 //	}
@@ -127,4 +158,6 @@
 //	        fmt.Printf("arg0 name=%s required=%v\n", arg0.Name, arg0.Required)
 //	    }
 //	}
+//
+//	fmt.Print(yargs.GenerateAgentHelpFromRegistry(reg, []string{"run"}, GlobalFlags{}))
 package yargs

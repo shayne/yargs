@@ -1,8 +1,8 @@
 # yargs
 
 A reflection-based, generic, type-safe CLI parser for Go that reads struct tags
-and generates help text, with subcommands, grouped commands, and LLM-friendly
-output.
+and generates help text, with subcommands, grouped commands, and agent-readable
+CLI context.
 
 ## Table of Contents
 
@@ -11,7 +11,7 @@ output.
 - [Quick Start (Single Command)](#quick-start-single-command)
 - [Subcommands (Global + Command Flags)](#subcommands-global--command-flags)
 - [Command Groups ("gh repo" style)](#command-groups-gh-repo-style)
-- [Help Generation (Human + LLM)](#help-generation-human--llm)
+- [Help Generation (Human + Agent)](#help-generation-human--agent)
 - [Help metadata fields](#help-metadata-fields)
 - [Flag Tags](#flag-tags)
 - [Supported Flag Types](#supported-flag-types)
@@ -32,7 +32,7 @@ output.
 - Type-safe flag parsing with Go generics.
 - Global + subcommand flag separation (including mixed ordering).
 - Positional argument schemas with validation and auto-population.
-- Automatic help text (human and LLM optimized).
+- Automatic human help plus agent-readable CLI context.
 - Command groups ("docker run"-style) and aliases.
 - Flags can appear anywhere; supports `--` passthrough.
 - Optional flags via pointer types; defaults via struct tags.
@@ -224,9 +224,10 @@ groups := map[string]yargs.Group{
 _ = yargs.RunSubcommandsWithGroups(context.Background(), os.Args[1:], config, GlobalFlags{}, nil, groups)
 ```
 
-## Help Generation (Human + LLM)
+## Help Generation (Human + Agent)
 
-Yargs can emit human help or LLM-optimized help from the same metadata.
+Yargs can emit human help for people and agent-readable context for automation
+agents from the same metadata.
 
 ### Human help
 
@@ -236,18 +237,42 @@ Yargs can emit human help or LLM-optimized help from the same metadata.
 - Subcommand: `GenerateSubCommandHelp`
 - Dispatcher: `RunSubcommands` and `RunSubcommandsWithGroups`
 
-### LLM help
+### Agent help
 
-- Global: `GenerateGlobalHelpLLM`
-- Group: `GenerateGroupHelpLLM`
-- Group command: `GenerateGroupCommandHelpLLM`
-- Subcommand: `GenerateSubCommandHelpLLM`
-- Flags: `--help-llm`
+- Global: `GenerateAgentHelp`
+- Command, group, or group command: `GenerateAgentHelpForCommand`
+- Registry-aware command help: `GenerateAgentHelpFromRegistry`
+- Flag: `--help-agent`
+
+Agent help is structured Markdown intended to be loaded into an automation
+agent's context after it discovers the CLI. It includes purpose, operating
+rules, discovery commands, usage, flags, positional arguments, examples, and
+safety notes. Hidden commands and hidden groups are omitted.
+
+```go
+config := yargs.HelpConfig{
+    Command: yargs.CommandInfo{
+        Name:        "app",
+        Description: "Manage app services",
+        Agent: yargs.AgentInfo{
+            Summary: "Use app to inspect and operate services.",
+            Rules: []string{
+                "Prefer --json when parsing command output.",
+            },
+            Safety: []string{
+                "Do not delete services unless the user explicitly asks.",
+            },
+        },
+    },
+}
+
+fmt.Print(yargs.GenerateAgentHelp(config, struct{}{}))
+```
 
 ### Parse-and-handle help
 
 `ParseWithCommandAndHelp` and `ParseAndHandleHelp` will detect `help`, `-h`,
-`--help`, and `--help-llm` and return the right error sentinel.
+`--help`, and `--help-agent` and return the right error sentinel.
 `ParseAndHandleHelp` prints help automatically and returns `ErrShown`.
 The `help` subcommand is supported as `app help` or `app help <command>`.
 
@@ -255,9 +280,12 @@ The `help` subcommand is supported as `app help` or `app help <command>`.
 
 You control help output with these fields:
 
-- `CommandInfo`: `Name`, `Description`, `Examples`, `LLMInstructions`
-- `SubCommandInfo`: `Name`, `Description`, `Usage`, `Examples`, `Aliases`, `Hidden`, `LLMInstructions`
-- `GroupInfo`: `Name`, `Description`, `Commands`, `Hidden`, `LLMInstructions`
+- `CommandInfo`: `Name`, `Description`, `Examples`, `Agent`
+- `SubCommandInfo`: `Name`, `Description`, `Usage`, `Examples`, `Aliases`, `Hidden`, `Agent`
+- `GroupInfo`: `Name`, `Description`, `Commands`, `Hidden`, `Agent`
+
+`AgentInfo` can provide `Summary`, `Rules`, `Discovery`, and `Safety`. Rules and
+safety notes inherit from the CLI to groups and commands.
 
 ## Flag Tags
 
@@ -375,15 +403,31 @@ remaining, values := yargs.ConsumeFlagsBySpec(os.Args[1:], specs)
 
 ## Registry & Introspection
 
-Use `Registry` for schema-aware command resolution and positional metadata.
+Use `Registry` for schema-aware command resolution, positional metadata, and
+registry-backed agent help.
 
 ```go
+type RunFlags struct {
+    Detach bool `flag:"detach" help:"Run in background"`
+}
+
+type RunArgs struct {
+    Service string `pos:"0" help:"Service name"`
+}
+
 reg := yargs.Registry{
     Command: yargs.CommandInfo{Name: "app"},
     SubCommands: map[string]yargs.CommandSpec{
         "run": {
-            Info:       yargs.SubCommandInfo{Name: "run"},
-            ArgsSchema: RunArgs{},
+            Info: yargs.SubCommandInfo{
+                Name:        "run",
+                Description: "Run a service",
+                Agent: yargs.AgentInfo{
+                    Summary: "Start a named service.",
+                },
+            },
+            FlagsSchema: RunFlags{},
+            ArgsSchema:  RunArgs{},
         },
     },
 }
@@ -394,6 +438,8 @@ if ok {
         fmt.Printf("arg0 name=%s required=%v\n", spec.Name, spec.Required)
     }
 }
+
+fmt.Print(yargs.GenerateAgentHelpFromRegistry(reg, []string{"run"}, struct{}{}))
 ```
 
 ## Remaining Args (`--`)
@@ -410,7 +456,7 @@ result, _ := yargs.ParseFlags[Flags]([]string{"-v", "arg1", "--", "--raw", "x"})
 
 Yargs exposes structured errors for control flow and diagnostics:
 
-- `ErrHelp`, `ErrSubCommandHelp`, `ErrHelpLLM` for help requests.
+- `ErrHelp`, `ErrSubCommandHelp`, `ErrHelpAgent` for help requests.
 - `ErrShown` from `ParseAndHandleHelp` when it already printed output.
 - `InvalidFlagError` for unknown flags.
 - `InvalidArgsError` for bad positional args.

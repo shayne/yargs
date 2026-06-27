@@ -36,7 +36,7 @@ type Port uint16
 const (
 	helpFlagLong  = "--help"
 	helpFlagShort = "-h"
-	helpFlagLLM   = "--help-llm"
+	helpFlagAgent = "--help-agent"
 	helpCommand   = "help"
 )
 
@@ -48,8 +48,8 @@ var (
 	// ErrSubCommandHelp is returned when subcommand-specific help is requested
 	ErrSubCommandHelp = errors.New("subcommand help requested")
 
-	// ErrHelpLLM is returned when LLM-optimized help is requested (--help-llm)
-	ErrHelpLLM = errors.New("llm help requested")
+	// ErrHelpAgent is returned when agent-readable help is requested (--help-agent).
+	ErrHelpAgent = errors.New("agent help requested")
 
 	// ErrShown is returned by ParseAndHandleHelp when help or an error message was displayed.
 	// This allows callers to distinguish between "message displayed successfully" and other errors.
@@ -101,23 +101,31 @@ func (e *FlagValueError) Unwrap() error {
 	return e.Err
 }
 
+// AgentInfo contains optional guidance for agent-readable help output.
+type AgentInfo struct {
+	Summary   string
+	Rules     []string
+	Safety    []string
+	Discovery []string
+}
+
 // CommandInfo contains metadata about the CLI command for help generation.
 type CommandInfo struct {
-	Name            string
-	Description     string
-	Examples        []string
-	LLMInstructions string // Additional instructions for LLMs (only shown in --help-llm)
+	Name        string
+	Description string
+	Examples    []string
+	Agent       AgentInfo
 }
 
 // SubCommandInfo contains metadata about a subcommand for help generation.
 type SubCommandInfo struct {
-	Name            string
-	Description     string
-	Usage           string // e.g., "SERVICE" or "SERVICE [SERVICE...]"
-	Examples        []string
-	Aliases         []string
-	Hidden          bool   // Hidden subcommands don't appear in help but still work
-	LLMInstructions string // Additional instructions for LLMs (only shown in --help-llm)
+	Name        string
+	Description string
+	Usage       string // e.g., "SERVICE" or "SERVICE [SERVICE...]"
+	Examples    []string
+	Aliases     []string
+	Hidden      bool // Hidden subcommands don't appear in help but still work
+	Agent       AgentInfo
 }
 
 // Group represents a collection of related subcommands with their runtime handlers.
@@ -158,11 +166,11 @@ type Group struct {
 //	    },
 //	}
 type GroupInfo struct {
-	Name            string
-	Description     string
-	Commands        map[string]SubCommandInfo // Commands within this group
-	Hidden          bool                      // Hidden groups don't appear in help but still work
-	LLMInstructions string                    // Additional instructions for LLMs (only shown in --help-llm)
+	Name        string
+	Description string
+	Commands    map[string]SubCommandInfo // Commands within this group
+	Hidden      bool                      // Hidden groups don't appear in help but still work
+	Agent       AgentInfo
 }
 
 // HelpConfig contains all metadata needed for help generation.
@@ -185,10 +193,11 @@ type ArgSpec struct {
 	IsSlice     bool
 }
 
-// CommandSpec describes a subcommand with optional positional-argument schema.
+// CommandSpec describes a subcommand with optional flag and positional schemas.
 type CommandSpec struct {
-	Info       SubCommandInfo
-	ArgsSchema any
+	Info        SubCommandInfo
+	FlagsSchema any
+	ArgsSchema  any
 }
 
 // GroupSpec describes a group of commands with optional positional-argument schemas.
@@ -250,6 +259,8 @@ type ResolvedCommand struct {
 	Path []string
 	Info SubCommandInfo
 	Args []string
+	// FlagsSchema is an optional schema (struct with `flag` tags) used for introspection.
+	FlagsSchema any
 	// ArgsSchema is an optional schema (struct with `pos` tags) used for introspection.
 	ArgsSchema any
 }
@@ -1175,7 +1186,7 @@ func GenerateGlobalHelp[G any](config HelpConfig, globalFlagsExample G) string {
 			b.WriteString("\n")
 		}
 		b.WriteString(fmt.Sprintf("%-28s %s\n", fmt.Sprintf("    %s, %s", helpFlagShort, helpFlagLong), "Show help"))
-		b.WriteString(fmt.Sprintf("%-28s %s\n\n", fmt.Sprintf("        %s", helpFlagLLM), "Show LLM-optimized help"))
+		b.WriteString(fmt.Sprintf("%-28s %s\n\n", fmt.Sprintf("        %s", helpFlagAgent), "Show agent-readable CLI context"))
 	}
 
 	// Examples
@@ -1446,7 +1457,7 @@ func GenerateSubCommandHelp[G any, S any, A any](config HelpConfig, subCmdName s
 			b.WriteString("\n")
 		}
 		b.WriteString(fmt.Sprintf("%-28s %s\n", fmt.Sprintf("    %s, %s", helpFlagShort, helpFlagLong), "Show this help message"))
-		b.WriteString(fmt.Sprintf("%-28s %s\n\n", fmt.Sprintf("        %s", helpFlagLLM), "Show LLM-optimized help"))
+		b.WriteString(fmt.Sprintf("%-28s %s\n\n", fmt.Sprintf("        %s", helpFlagAgent), "Show agent-readable CLI context"))
 	}
 
 	// Global options
@@ -1507,10 +1518,10 @@ func GenerateGlobalHelpLLM[G any](config HelpConfig, globalFlagsExample G) strin
 		b.WriteString("\n\n")
 	}
 
-	// LLM Instructions for the command
-	if config.Command.LLMInstructions != "" {
+	// Extra guidance for the command.
+	if config.Command.Agent.Summary != "" {
 		b.WriteString("## LLM Instructions\n\n")
-		b.WriteString(config.Command.LLMInstructions)
+		b.WriteString(config.Command.Agent.Summary)
 		b.WriteString("\n\n")
 	}
 
@@ -1577,9 +1588,9 @@ func GenerateGlobalHelpLLM[G any](config HelpConfig, globalFlagsExample G) strin
 					}
 					b.WriteString("\n\n")
 				}
-				if info.LLMInstructions != "" {
+				if info.Agent.Summary != "" {
 					b.WriteString("**LLM Instructions**: ")
-					b.WriteString(info.LLMInstructions)
+					b.WriteString(info.Agent.Summary)
 					b.WriteString("\n\n")
 				}
 				if len(info.Examples) > 0 {
@@ -1613,9 +1624,9 @@ func GenerateGlobalHelpLLM[G any](config HelpConfig, globalFlagsExample G) strin
 					b.WriteString(info.Description)
 					b.WriteString("\n\n")
 				}
-				if info.LLMInstructions != "" {
+				if info.Agent.Summary != "" {
 					b.WriteString("**LLM Instructions**: ")
-					b.WriteString(info.LLMInstructions)
+					b.WriteString(info.Agent.Summary)
 					b.WriteString("\n\n")
 				}
 
@@ -1678,10 +1689,10 @@ func GenerateGroupHelpLLM[G any](config HelpConfig, groupName string, globalFlag
 		b.WriteString("\n\n")
 	}
 
-	// LLM Instructions for the group
-	if group.LLMInstructions != "" {
+	// Extra guidance for the group.
+	if group.Agent.Summary != "" {
 		b.WriteString("## LLM Instructions\n\n")
-		b.WriteString(group.LLMInstructions)
+		b.WriteString(group.Agent.Summary)
 		b.WriteString("\n\n")
 	}
 
@@ -1736,9 +1747,9 @@ func GenerateGroupHelpLLM[G any](config HelpConfig, groupName string, globalFlag
 					b.WriteString(cmdInfo.Description)
 					b.WriteString("\n\n")
 				}
-				if cmdInfo.LLMInstructions != "" {
+				if cmdInfo.Agent.Summary != "" {
 					b.WriteString("**LLM Instructions**: ")
-					b.WriteString(cmdInfo.LLMInstructions)
+					b.WriteString(cmdInfo.Agent.Summary)
 					b.WriteString("\n\n")
 				}
 				if len(cmdInfo.Examples) > 0 {
@@ -1769,9 +1780,9 @@ func GenerateGroupCommandHelpLLM[G any](config HelpConfig, groupName, cmdName st
 		b.WriteString(cmd.Description)
 		b.WriteString("\n\n")
 	}
-	if cmd.LLMInstructions != "" {
+	if cmd.Agent.Summary != "" {
 		b.WriteString("## LLM Instructions\n\n")
-		b.WriteString(cmd.LLMInstructions)
+		b.WriteString(cmd.Agent.Summary)
 		b.WriteString("\n\n")
 	}
 
@@ -1831,10 +1842,10 @@ func GenerateSubCommandHelpLLM[G any, S any, A any](config HelpConfig, subCmdNam
 		b.WriteString("\n\n")
 	}
 
-	// LLM Instructions for the subcommand
-	if subCmd.LLMInstructions != "" {
+	// Extra guidance for the subcommand.
+	if subCmd.Agent.Summary != "" {
 		b.WriteString("## LLM Instructions\n\n")
-		b.WriteString(subCmd.LLMInstructions)
+		b.WriteString(subCmd.Agent.Summary)
 		b.WriteString("\n\n")
 	}
 
@@ -2142,13 +2153,6 @@ func ParseWithCommandAndHelp[G any, S any, A any](args []string, config HelpConf
 
 	// Check for help flags before parsing
 	if len(args) > 0 {
-		// Check for global --help-llm
-		if args[0] == helpFlagLLM {
-			helpText := GenerateGlobalHelpLLM(config, globalFlags)
-			return &TypedParseResult[G, S, A]{
-				HelpText: helpText,
-			}, ErrHelpLLM
-		}
 		args = ApplyAliases(args, config)
 
 		// Check for "help SUBCOMMAND" pattern first (more specific)
@@ -2168,7 +2172,7 @@ func ParseWithCommandAndHelp[G any, S any, A any](args []string, config HelpConf
 			}, ErrHelp
 		}
 
-		// Check for subcommand help (e.g., "run --help" or "run --help-llm")
+		// Check for subcommand help (e.g., "run --help")
 		if len(args) > 1 {
 			// Find the subcommand
 			var subCmdName string
@@ -2181,12 +2185,6 @@ func ParseWithCommandAndHelp[G any, S any, A any](args []string, config HelpConf
 
 			// Check if help is requested for this subcommand
 			for i := 1; i < len(args); i++ {
-				if args[i] == helpFlagLLM {
-					helpText := GenerateSubCommandHelpLLM(config, subCmdName, globalFlags, subCmdFlags, argsStruct)
-					return &TypedParseResult[G, S, A]{
-						HelpText: helpText,
-					}, ErrHelpLLM
-				}
 				if args[i] == helpFlagLong || args[i] == helpFlagShort {
 					helpText := GenerateSubCommandHelp(config, subCmdName, globalFlags, subCmdFlags, argsStruct)
 					return &TypedParseResult[G, S, A]{
@@ -2247,7 +2245,7 @@ func ResolveCommand(args []string, config HelpConfig) (ResolvedCommand, bool, er
 	if len(args) == 0 {
 		return ResolvedCommand{}, false, nil
 	}
-	if args[0] == helpCommand || args[0] == helpFlagLong || args[0] == helpFlagShort || args[0] == helpFlagLLM {
+	if args[0] == helpCommand || args[0] == helpFlagLong || args[0] == helpFlagShort {
 		return ResolvedCommand{}, false, nil
 	}
 	args = ApplyAliases(args, config)
@@ -2291,6 +2289,7 @@ func ResolveCommandWithRegistry(args []string, reg Registry) (ResolvedCommand, b
 		return res, ok, err
 	}
 	if spec, ok := reg.CommandSpec(res.Path); ok {
+		res.FlagsSchema = spec.FlagsSchema
 		res.ArgsSchema = spec.ArgsSchema
 	}
 	return res, ok, err
@@ -2305,28 +2304,23 @@ func isHelpFlag(arg string) bool {
 	return arg == helpCommand || arg == helpFlagLong || arg == helpFlagShort
 }
 
-func helpFlagsInArgs(args []string) (help bool, helpLLM bool) {
+func helpFlagsInArgs(args []string) bool {
 	for _, arg := range args {
-		if arg == helpFlagLLM {
-			helpLLM = true
-			continue
-		}
 		if arg == helpFlagLong || arg == helpFlagShort {
-			help = true
+			return true
 		}
 	}
-	return help, helpLLM
+	return false
 }
 
-func groupedHelpTargets(args []string) (groupHelp bool, groupHelpLLM bool, commandHelp bool, commandHelpLLM bool) {
+func groupedHelpTargets(args []string) (groupHelp bool, commandHelp bool) {
 	indices := findNonFlagArgs(args)
 	if len(indices) < 2 {
-		groupHelp, groupHelpLLM = helpFlagsInArgs(args)
-		return groupHelp, groupHelpLLM, false, false
+		return helpFlagsInArgs(args), false
 	}
-	groupHelp, groupHelpLLM = helpFlagsInArgs(args[indices[0]+1 : indices[1]])
-	commandHelp, commandHelpLLM = helpFlagsInArgs(args[indices[1]+1:])
-	return groupHelp, groupHelpLLM, commandHelp, commandHelpLLM
+	groupHelp = helpFlagsInArgs(args[indices[0]+1 : indices[1]])
+	commandHelp = helpFlagsInArgs(args[indices[1]+1:])
+	return groupHelp, commandHelp
 }
 
 // stripFirstNonFlagArg removes the first non-flag argument from args.
@@ -2413,12 +2407,6 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 		return nil
 	}
 
-	// Check for global --help-llm
-	if args[0] == helpFlagLLM {
-		fmt.Print(GenerateGlobalHelpLLM(config, globalFlagsExample))
-		return nil
-	}
-
 	args = ApplyAliases(args, config)
 
 	// Validate no conflicts between flat commands and groups
@@ -2441,12 +2429,8 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 	if first != "" && second != "" {
 		// Check if first arg is a group
 		if grp, isGroup := groups[first]; isGroup {
-			groupHelp, groupHelpLLM, commandHelp, commandHelpLLM := groupedHelpTargets(args)
-			if groupHelp || groupHelpLLM {
-				if groupHelpLLM {
-					fmt.Print(GenerateGroupHelpLLM(config, first, globalFlagsExample))
-					return nil
-				}
+			groupHelp, commandHelp := groupedHelpTargets(args)
+			if groupHelp {
 				fmt.Print(GenerateGroupHelp(config, first, globalFlagsExample))
 				return nil
 			}
@@ -2455,11 +2439,7 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 			if !ok {
 				return fmt.Errorf("unknown command in group '%s': %s\nRun '%s %s' for usage", first, second, config.Command.Name, first)
 			}
-			if commandHelp || commandHelpLLM {
-				if commandHelpLLM {
-					fmt.Print(GenerateGroupCommandHelpLLM(config, first, second, globalFlagsExample))
-					return nil
-				}
+			if commandHelp {
 				fmt.Print(GenerateGroupCommandHelp(config, first, second, globalFlagsExample))
 				return nil
 			}
@@ -2480,13 +2460,6 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 
 	// Check if it's a group (show group help)
 	if _, isGroup := groups[cmdName]; isGroup {
-		// Check for --help-llm flag
-		for _, arg := range args {
-			if arg == helpFlagLLM {
-				fmt.Print(GenerateGroupHelpLLM(config, cmdName, globalFlagsExample))
-				return nil
-			}
-		}
 		fmt.Print(GenerateGroupHelp(config, cmdName, globalFlagsExample))
 		return nil
 	}
@@ -2496,11 +2469,7 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 	if !ok {
 		return fmt.Errorf("unknown command: %s\nRun '%s --help' for usage", cmdName, config.Command.Name)
 	}
-	if help, helpLLM := helpFlagsInArgs(args); help || helpLLM {
-		if helpLLM {
-			fmt.Print(GenerateSubCommandHelpLLMFromConfig(config, cmdName, globalFlagsExample))
-			return nil
-		}
+	if helpFlagsInArgs(args) {
 		fmt.Print(GenerateSubCommandHelpFromConfig(config, cmdName, globalFlagsExample))
 		return nil
 	}
@@ -2554,7 +2523,7 @@ func isVerboseEnabled[G any](globalFlags G) bool {
 func ParseAndHandleHelp[G any, S any, A any](args []string, config HelpConfig) (*TypedParseResult[G, S, A], error) {
 	result, err := ParseWithCommandAndHelp[G, S, A](args, config)
 	if err != nil {
-		if errors.Is(err, ErrHelp) || errors.Is(err, ErrSubCommandHelp) || errors.Is(err, ErrHelpLLM) {
+		if errors.Is(err, ErrHelp) || errors.Is(err, ErrSubCommandHelp) || errors.Is(err, ErrHelpAgent) {
 			fmt.Print(result.HelpText)
 			return nil, ErrShown
 		}

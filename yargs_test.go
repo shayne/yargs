@@ -273,38 +273,6 @@ func TestRunSubcommandsWithGroups_SubcommandHelp(t *testing.T) {
 	}
 }
 
-func TestRunSubcommandsWithGroups_SubcommandHelpLLM(t *testing.T) {
-	config := HelpConfig{
-		Command: CommandInfo{Name: "testcli"},
-		SubCommands: map[string]SubCommandInfo{
-			"run": {Name: "run", Description: "Run command"},
-		},
-	}
-	called := false
-	handlers := map[string]SubcommandHandler{
-		"run": func(ctx context.Context, args []string) error {
-			called = true
-			return nil
-		},
-	}
-
-	output := captureStdout(t, func() {
-		if err := RunSubcommandsWithGroups(context.Background(), []string{"run", "--help-llm"}, config, struct{}{}, handlers, nil); err != nil {
-			t.Fatalf("RunSubcommandsWithGroups returned error: %v", err)
-		}
-	})
-
-	if called {
-		t.Fatal("expected help to short-circuit handler")
-	}
-	if !strings.Contains(output, "# testcli run") {
-		t.Fatalf("expected LLM help output to include header, got: %s", output)
-	}
-	if !strings.Contains(output, "## Usage") {
-		t.Fatalf("expected LLM help output to include usage section, got: %s", output)
-	}
-}
-
 func TestRunSubcommandsWithGroups_GroupSubcommandHelp(t *testing.T) {
 	config := HelpConfig{
 		Command: CommandInfo{Name: "testcli"},
@@ -355,47 +323,6 @@ func TestRunSubcommandsWithGroups_GroupSubcommandHelp(t *testing.T) {
 	}
 	if !strings.Contains(output, "testcli docker run nginx") {
 		t.Fatalf("expected grouped command examples, got: %s", output)
-	}
-}
-
-func TestRunSubcommandsWithGroups_GroupSubcommandHelpLLM(t *testing.T) {
-	config := HelpConfig{
-		Command: CommandInfo{Name: "testcli"},
-		Groups: map[string]GroupInfo{
-			"docker": {
-				Name: "docker",
-				Commands: map[string]SubCommandInfo{
-					"run": {Name: "run", Description: "Run a container", Usage: "docker run <image>"},
-				},
-			},
-		},
-	}
-	called := false
-	groups := map[string]Group{
-		"docker": {
-			Commands: map[string]SubcommandHandler{
-				"run": func(ctx context.Context, args []string) error {
-					called = true
-					return nil
-				},
-			},
-		},
-	}
-
-	output := captureStdout(t, func() {
-		if err := RunSubcommandsWithGroups(context.Background(), []string{"docker", "run", "--help-llm"}, config, struct{}{}, nil, groups); err != nil {
-			t.Fatalf("RunSubcommandsWithGroups returned error: %v", err)
-		}
-	})
-
-	if called {
-		t.Fatal("expected help to short-circuit handler")
-	}
-	if !strings.Contains(output, "# testcli docker run") {
-		t.Fatalf("expected LLM help header, got: %s", output)
-	}
-	if !strings.Contains(output, "## Usage") {
-		t.Fatalf("expected LLM help usage, got: %s", output)
 	}
 }
 
@@ -520,7 +447,7 @@ func TestRunSubcommandsWithGroupsHandlesAgentHelp(t *testing.T) {
 				t.Fatalf("expected agent help to short-circuit handlers, got calls: %v", calls)
 			}
 			mustContain(t, output, tt.want...)
-			mustNotContain(t, output, "USAGE:", "--help-llm", "Unknown command: prod.yaml")
+			mustNotContain(t, output, "USAGE:", "Unknown command: prod.yaml")
 		})
 	}
 }
@@ -1222,9 +1149,6 @@ func TestGenerateGlobalHelpAdvertisesAgentHelp(t *testing.T) {
 	helpText := GenerateGlobalHelp(config, GlobalFlags{})
 	if !strings.Contains(helpText, "--help-agent") {
 		t.Fatalf("human help should advertise --help-agent:\n%s", helpText)
-	}
-	if strings.Contains(helpText, "--help-llm") {
-		t.Fatalf("human help should not advertise --help-llm:\n%s", helpText)
 	}
 }
 

@@ -113,8 +113,6 @@ func TestGenerateAgentHelpGlobal(t *testing.T) {
 	)
 
 	mustNotContain(t, output,
-		"LLM Instructions",
-		"--help-llm",
 		"### `hidden`",
 		"### `hiddengroup`",
 	)
@@ -499,7 +497,7 @@ func TestErrHelpAgent(t *testing.T) {
 				t.Fatal("ParseWithCommandAndHelp result is nil")
 			}
 			mustContain(t, result.HelpText, tt.want...)
-			mustNotContain(t, result.HelpText, "USAGE:", "--help-llm", "Unknown command: prod.yaml")
+			mustNotContain(t, result.HelpText, "USAGE:", "Unknown command: prod.yaml")
 		})
 	}
 }

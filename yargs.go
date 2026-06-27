@@ -1404,16 +1404,6 @@ func GenerateSubCommandHelp[G any, S any, A any](config HelpConfig, subCmdName s
 		b.WriteString("\n\n")
 	}
 	if len(subCmd.Aliases) > 0 {
-		b.WriteString("**Aliases**: ")
-		for i, alias := range subCmd.Aliases {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(fmt.Sprintf("`%s`", alias))
-		}
-		b.WriteString("\n\n")
-	}
-	if len(subCmd.Aliases) > 0 {
 		b.WriteString("ALIASES:\n")
 		b.WriteString(fmt.Sprintf("    %s\n\n", strings.Join(subCmd.Aliases, ", ")))
 	}

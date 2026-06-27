@@ -3632,6 +3632,37 @@ func TestGenerateGroupHelp(t *testing.T) {
 	}
 }
 
+func TestGenerateSubCommandHelpUsesPlainAliasSectionOnly(t *testing.T) {
+	type GlobalFlags struct{}
+	type RemoveFlags struct {
+		Yes bool `flag:"yes" short:"y" help:"Skip confirmation"`
+	}
+	type RemoveArgs struct {
+		Service string `pos:"0?" help:"Service name"`
+	}
+	config := HelpConfig{
+		Command: CommandInfo{Name: "testcli"},
+		SubCommands: map[string]SubCommandInfo{
+			"remove": {
+				Name:        "remove",
+				Description: "Remove a service",
+				Aliases:     []string{"rm"},
+			},
+		},
+	}
+
+	help := GenerateSubCommandHelp(config, "remove", GlobalFlags{}, RemoveFlags{}, RemoveArgs{})
+	if strings.Contains(help, "**Aliases**") {
+		t.Fatalf("help contains markdown alias block:\n%s", help)
+	}
+	if strings.Count(help, "ALIASES:") != 1 {
+		t.Fatalf("alias section count = %d, want 1:\n%s", strings.Count(help, "ALIASES:"), help)
+	}
+	if !strings.Contains(help, "    rm\n") {
+		t.Fatalf("help missing plain alias entry:\n%s", help)
+	}
+}
+
 // TestGenerateGlobalHelpWithGroups tests that global help shows command groups
 func TestGenerateGlobalHelpWithGroups(t *testing.T) {
 	type GlobalFlags struct {

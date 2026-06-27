@@ -213,6 +213,32 @@ type Registry struct {
 	Groups      map[string]GroupSpec
 }
 
+type AgentHelpTargetKind string
+
+const (
+	AgentHelpGlobal       AgentHelpTargetKind = "global"
+	AgentHelpGroup        AgentHelpTargetKind = "group"
+	AgentHelpCommand      AgentHelpTargetKind = "command"
+	AgentHelpGroupCommand AgentHelpTargetKind = "group_command"
+)
+
+type AgentHelpTarget struct {
+	Kind        AgentHelpTargetKind
+	Path        []string
+	Command     CommandInfo
+	Group       GroupInfo
+	SubCommand  SubCommandInfo
+	FlagsSchema any
+	ArgsSchema  any
+}
+
+var defaultAgentRules = []string{
+	"Prefer exact examples when they match the task.",
+	"Use command-specific agent help before running an unfamiliar command.",
+	"Do not invent flags; use only flags listed in this context or command help.",
+	"Preserve arguments after `--` as payload or application arguments.",
+}
+
 // HelpConfig returns a HelpConfig derived from the registry.
 func (r Registry) HelpConfig() HelpConfig {
 	subcommands := make(map[string]SubCommandInfo, len(r.SubCommands))
@@ -1502,6 +1528,620 @@ func GenerateSubCommandHelp[G any, S any, A any](config HelpConfig, subCmdName s
 // It omits subcommand-specific flags and arguments when no structured types are available.
 func GenerateSubCommandHelpFromConfig[G any](config HelpConfig, subCmdName string, globalFlagsExample G) string {
 	return GenerateSubCommandHelp(config, subCmdName, globalFlagsExample, struct{}{}, struct{}{})
+}
+
+// GenerateAgentHelp generates agent-readable help for the entire CLI.
+func GenerateAgentHelp[G any](config HelpConfig, globalFlagsExample G) string {
+	target := AgentHelpTarget{
+		Kind:    AgentHelpGlobal,
+		Command: config.Command,
+	}
+	return renderAgentHelp(config, target, globalFlagsExample)
+}
+
+// GenerateAgentHelpForCommand generates agent-readable help for a flat command,
+// command group, or grouped command from HelpConfig metadata.
+func GenerateAgentHelpForCommand[G any, S any, A any](config HelpConfig, commandPath []string, globalFlagsExample G, flagsExample S, argsExample A) string {
+	target, ok := agentHelpTargetFromConfig(config, commandPath)
+	if !ok {
+		return unknownAgentHelpTarget(config, commandPath)
+	}
+	if target.Kind == AgentHelpCommand || target.Kind == AgentHelpGroupCommand {
+		target.FlagsSchema = flagsExample
+		target.ArgsSchema = argsExample
+	}
+	return renderAgentHelp(config, target, globalFlagsExample)
+}
+
+// GenerateAgentHelpFromRegistry generates agent-readable help using the
+// registry's command metadata plus optional command flag and argument schemas.
+func GenerateAgentHelpFromRegistry[G any](reg Registry, commandPath []string, globalFlagsExample G) string {
+	config := reg.HelpConfig()
+	target, ok := agentHelpTargetFromConfig(config, commandPath)
+	if !ok {
+		return unknownAgentHelpTarget(config, commandPath)
+	}
+	if target.Kind == AgentHelpCommand || target.Kind == AgentHelpGroupCommand {
+		if spec, ok := reg.CommandSpec(target.Path); ok {
+			target.FlagsSchema = spec.FlagsSchema
+			target.ArgsSchema = spec.ArgsSchema
+		}
+	}
+	return renderAgentHelp(config, target, globalFlagsExample)
+}
+
+func agentHelpTargetFromConfig(config HelpConfig, commandPath []string) (AgentHelpTarget, bool) {
+	if len(commandPath) == 0 {
+		return AgentHelpTarget{
+			Kind:    AgentHelpGlobal,
+			Command: config.Command,
+		}, true
+	}
+
+	if len(commandPath) == 1 {
+		name := commandPath[0]
+		if canonical, ok := canonicalFlatCommandName(config, name); ok {
+			return AgentHelpTarget{
+				Kind:       AgentHelpCommand,
+				Path:       []string{canonical},
+				Command:    config.Command,
+				SubCommand: config.SubCommands[canonical],
+			}, true
+		}
+		if group, ok := config.Groups[name]; ok {
+			if group.Hidden {
+				return AgentHelpTarget{}, false
+			}
+			return AgentHelpTarget{
+				Kind:    AgentHelpGroup,
+				Path:    []string{name},
+				Command: config.Command,
+				Group:   group,
+			}, true
+		}
+		return AgentHelpTarget{}, false
+	}
+
+	if len(commandPath) == 2 {
+		groupName := commandPath[0]
+		cmdName, ok := canonicalGroupCommandName(config, groupName, commandPath[1])
+		if !ok {
+			return AgentHelpTarget{}, false
+		}
+		group := config.Groups[groupName]
+		return AgentHelpTarget{
+			Kind:       AgentHelpGroupCommand,
+			Path:       []string{groupName, cmdName},
+			Command:    config.Command,
+			Group:      group,
+			SubCommand: group.Commands[cmdName],
+		}, true
+	}
+
+	return AgentHelpTarget{}, false
+}
+
+func canonicalFlatCommandName(config HelpConfig, name string) (string, bool) {
+	if info, ok := config.SubCommands[name]; ok && !info.Hidden {
+		return name, true
+	}
+	aliases := buildAliasMaps(config)
+	canonical, ok := aliases.flat[name]
+	if !ok {
+		return "", false
+	}
+	info, ok := config.SubCommands[canonical]
+	if !ok || info.Hidden {
+		return "", false
+	}
+	return canonical, true
+}
+
+func canonicalGroupCommandName(config HelpConfig, groupName, cmdName string) (string, bool) {
+	group, ok := config.Groups[groupName]
+	if !ok || group.Hidden {
+		return "", false
+	}
+	if info, ok := group.Commands[cmdName]; ok && !info.Hidden {
+		return cmdName, true
+	}
+	aliases := buildAliasMaps(config)
+	canonical, ok := aliases.group[groupName][cmdName]
+	if !ok {
+		return "", false
+	}
+	info, ok := group.Commands[canonical]
+	if !ok || info.Hidden {
+		return "", false
+	}
+	return canonical, true
+}
+
+func unknownAgentHelpTarget(config HelpConfig, commandPath []string) string {
+	return fmt.Sprintf("Unknown command: %s. Run `%s --help-agent` to inspect available commands.\n", strings.Join(commandPath, " "), config.Command.Name)
+}
+
+func renderAgentHelp(config HelpConfig, target AgentHelpTarget, globalFlagsExample any) string {
+	switch target.Kind {
+	case AgentHelpGlobal:
+		return renderGlobalAgentHelp(config, target, globalFlagsExample)
+	case AgentHelpGroup:
+		return renderGroupAgentHelp(config, target, globalFlagsExample)
+	case AgentHelpCommand, AgentHelpGroupCommand:
+		return renderCommandAgentHelp(config, target, globalFlagsExample)
+	default:
+		return unknownAgentHelpTarget(config, target.Path)
+	}
+}
+
+func renderAgentList(b *strings.Builder, items []string) {
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		b.WriteString("- ")
+		b.WriteString(item)
+		b.WriteString("\n")
+	}
+}
+
+func combinedAgentRules(infos ...AgentInfo) []string {
+	rules := make([]string, 0, len(defaultAgentRules))
+	rules = append(rules, defaultAgentRules...)
+	for _, info := range infos {
+		for _, rule := range info.Rules {
+			if strings.TrimSpace(rule) == "" {
+				continue
+			}
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+func combinedAgentSafety(infos ...AgentInfo) []string {
+	var safety []string
+	for _, info := range infos {
+		for _, note := range info.Safety {
+			if strings.TrimSpace(note) == "" {
+				continue
+			}
+			safety = append(safety, note)
+		}
+	}
+	return safety
+}
+
+func agentPurpose(description string, info AgentInfo) string {
+	if strings.TrimSpace(info.Summary) != "" {
+		return info.Summary
+	}
+	if strings.TrimSpace(description) != "" {
+		return description
+	}
+	return "Agent-readable context for this command."
+}
+
+func visibleSubcommandNames(commands map[string]SubCommandInfo) []string {
+	names := make([]string, 0, len(commands))
+	for name, info := range commands {
+		if !info.Hidden {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+func visibleGroupNames(groups map[string]GroupInfo) []string {
+	names := make([]string, 0, len(groups))
+	for name, info := range groups {
+		if !info.Hidden {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+func renderGlobalAgentHelp(config HelpConfig, target AgentHelpTarget, globalFlagsExample any) string {
+	var b strings.Builder
+	b.WriteString("# ")
+	b.WriteString(config.Command.Name)
+	b.WriteString(" Agent Context\n\n")
+
+	b.WriteString("## Purpose\n\n")
+	b.WriteString(agentPurpose(config.Command.Description, config.Command.Agent))
+	b.WriteString("\n\n")
+
+	b.WriteString("## Usage\n\n")
+	b.WriteString("```\n")
+	b.WriteString(agentUsage(config, target))
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Operating Rules\n\n")
+	renderAgentList(&b, combinedAgentRules(config.Command.Agent))
+	b.WriteString("\n")
+
+	discovery := make([]string, 0)
+	for _, name := range visibleSubcommandNames(config.SubCommands) {
+		discovery = append(discovery, fmt.Sprintf("Run `%s %s --help-agent` for command-specific context.", config.Command.Name, name))
+	}
+	for _, name := range visibleGroupNames(config.Groups) {
+		discovery = append(discovery, fmt.Sprintf("Run `%s %s --help-agent` for group-specific context.", config.Command.Name, name))
+	}
+	discovery = append(discovery, config.Command.Agent.Discovery...)
+	if len(discovery) > 0 {
+		b.WriteString("## Discovery\n\n")
+		renderAgentList(&b, discovery)
+		b.WriteString("\n")
+	}
+
+	renderAgentFlagsSection(&b, "Global Options", globalFlagsExample)
+	renderAgentCommandsSection(&b, config)
+	renderAgentGroupsSection(&b, config)
+	renderAgentExamplesSection(&b, config.Command.Examples)
+	renderAgentSafetySection(&b, config.Command.Agent.Safety)
+
+	return b.String()
+}
+
+func renderGroupAgentHelp(config HelpConfig, target AgentHelpTarget, globalFlagsExample any) string {
+	var b strings.Builder
+	b.WriteString("# ")
+	b.WriteString(config.Command.Name)
+	if len(target.Path) > 0 {
+		b.WriteString(" ")
+		b.WriteString(target.Path[0])
+	}
+	b.WriteString(" Agent Context\n\n")
+
+	b.WriteString("## Purpose\n\n")
+	b.WriteString(agentPurpose(target.Group.Description, target.Group.Agent))
+	b.WriteString("\n\n")
+
+	b.WriteString("## Usage\n\n")
+	b.WriteString("```\n")
+	b.WriteString(agentUsage(config, target))
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Operating Rules\n\n")
+	renderAgentList(&b, combinedAgentRules(config.Command.Agent, target.Group.Agent))
+	b.WriteString("\n")
+
+	discovery := make([]string, 0)
+	for _, name := range visibleSubcommandNames(target.Group.Commands) {
+		discovery = append(discovery, fmt.Sprintf("Run `%s %s %s --help-agent` for command-specific context.", config.Command.Name, target.Path[0], name))
+	}
+	discovery = append(discovery, target.Group.Agent.Discovery...)
+	if len(discovery) > 0 {
+		b.WriteString("## Discovery\n\n")
+		renderAgentList(&b, discovery)
+		b.WriteString("\n")
+	}
+
+	renderAgentFlagsSection(&b, "Global Options", globalFlagsExample)
+	renderAgentGroupCommandsSection(&b, config, target.Group, target.Path[0])
+	renderAgentSafetySection(&b, combinedAgentSafety(config.Command.Agent, target.Group.Agent))
+
+	return b.String()
+}
+
+func renderCommandAgentHelp(config HelpConfig, target AgentHelpTarget, globalFlagsExample any) string {
+	var b strings.Builder
+	b.WriteString("# ")
+	b.WriteString(config.Command.Name)
+	if len(target.Path) > 0 {
+		b.WriteString(" ")
+		b.WriteString(strings.Join(target.Path, " "))
+	}
+	b.WriteString(" Agent Context\n\n")
+
+	b.WriteString("## Purpose\n\n")
+	b.WriteString(agentPurpose(target.SubCommand.Description, target.SubCommand.Agent))
+	b.WriteString("\n\n")
+
+	if len(target.SubCommand.Aliases) > 0 {
+		b.WriteString("**Aliases**: ")
+		b.WriteString(agentBacktickList(target.SubCommand.Aliases))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("## Usage\n\n")
+	b.WriteString("```\n")
+	b.WriteString(agentUsage(config, target))
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Operating Rules\n\n")
+	renderAgentList(&b, combinedAgentRules(config.Command.Agent, target.Group.Agent, target.SubCommand.Agent))
+	b.WriteString("\n")
+
+	if len(target.SubCommand.Agent.Discovery) > 0 {
+		b.WriteString("## Discovery\n\n")
+		renderAgentList(&b, target.SubCommand.Agent.Discovery)
+		b.WriteString("\n")
+	}
+
+	renderAgentArgsSection(&b, target.ArgsSchema)
+	renderAgentFlagsSection(&b, "Options", target.FlagsSchema)
+	renderAgentFlagsSection(&b, "Global Options", globalFlagsExample)
+	renderAgentExamplesSection(&b, target.SubCommand.Examples)
+	renderAgentSafetySection(&b, combinedAgentSafety(config.Command.Agent, target.Group.Agent, target.SubCommand.Agent))
+
+	return b.String()
+}
+
+func agentUsage(config HelpConfig, target AgentHelpTarget) string {
+	commandName := config.Command.Name
+	switch target.Kind {
+	case AgentHelpGlobal:
+		return fmt.Sprintf("%s [GLOBAL_OPTIONS] COMMAND [ARGS...]", commandName)
+	case AgentHelpGroup:
+		if len(target.Path) == 0 {
+			return fmt.Sprintf("%s [GLOBAL_OPTIONS] COMMAND [ARGS...]", commandName)
+		}
+		return fmt.Sprintf("%s [GLOBAL_OPTIONS] %s COMMAND [ARGS...]", commandName, target.Path[0])
+	case AgentHelpCommand, AgentHelpGroupCommand:
+		if target.SubCommand.Usage != "" {
+			return agentExplicitUsage(commandName, target.Path, target.SubCommand.Usage)
+		}
+		usage := fmt.Sprintf("%s [GLOBAL_OPTIONS]", commandName)
+		if len(target.Path) > 0 {
+			usage += " " + strings.Join(target.Path, " ")
+		}
+		for _, arg := range agentArgsInfo(target.ArgsSchema) {
+			usage += " " + agentArgUsage(arg)
+		}
+		usage += " [OPTIONS]"
+		return usage
+	default:
+		return commandName
+	}
+}
+
+func agentExplicitUsage(commandName string, commandPath []string, usage string) string {
+	usage = strings.TrimSpace(usage)
+	if usage == "" {
+		return fmt.Sprintf("%s [GLOBAL_OPTIONS]", commandName)
+	}
+	if usage == commandName || strings.HasPrefix(usage, commandName+" ") {
+		return usage
+	}
+
+	prefix := fmt.Sprintf("%s [GLOBAL_OPTIONS]", commandName)
+	path := strings.Join(commandPath, " ")
+	if path == "" {
+		return prefix + " " + usage
+	}
+	if usage == path || strings.HasPrefix(usage, path+" ") {
+		return prefix + " " + usage
+	}
+
+	last := commandPath[len(commandPath)-1]
+	if usage == last || strings.HasPrefix(usage, last+" ") {
+		if len(commandPath) == 1 {
+			return prefix + " " + usage
+		}
+		parent := strings.Join(commandPath[:len(commandPath)-1], " ")
+		return prefix + " " + parent + " " + usage
+	}
+
+	return prefix + " " + path + " " + usage
+}
+
+func renderAgentArgsSection(b *strings.Builder, schema any) {
+	args := agentArgsInfo(schema)
+	if len(args) == 0 {
+		return
+	}
+	b.WriteString("## Arguments\n\n")
+	for _, arg := range args {
+		argName := strings.ToUpper(arg.Name)
+		b.WriteString("### `")
+		b.WriteString(argName)
+		b.WriteString("`\n\n")
+		if arg.Description != "" {
+			b.WriteString(arg.Description)
+			b.WriteString("\n\n")
+		}
+		b.WriteString(fmt.Sprintf("- **Type**: `%s`\n", arg.Type))
+		b.WriteString(fmt.Sprintf("- **Required**: %v\n", arg.Required || (arg.Variadic && arg.MinCount > 0)))
+		if arg.Variadic {
+			b.WriteString(fmt.Sprintf("- **Variadic**: true (minimum: %d)\n", arg.MinCount))
+		}
+		b.WriteString("\n")
+	}
+}
+
+func renderAgentFlagsSection(b *strings.Builder, title string, schema any) {
+	flags := agentFlagInfo(schema)
+	if len(flags) == 0 {
+		return
+	}
+	b.WriteString("## ")
+	b.WriteString(title)
+	b.WriteString("\n\n")
+	for _, flag := range flags {
+		b.WriteString("### `--")
+		b.WriteString(flag.Name)
+		b.WriteString("`")
+		if flag.ShortName != "" {
+			b.WriteString(fmt.Sprintf(" (short: `-%s`)", flag.ShortName))
+		}
+		b.WriteString("\n\n")
+		if flag.Description != "" {
+			b.WriteString(flag.Description)
+			b.WriteString("\n\n")
+		}
+		b.WriteString(fmt.Sprintf("- **Type**: `%s`\n", flag.Type))
+		if flag.DefaultVal != "" {
+			b.WriteString(fmt.Sprintf("- **Default**: `%s`\n", flag.DefaultVal))
+		}
+		b.WriteString("\n")
+	}
+}
+
+func renderAgentCommandsSection(b *strings.Builder, config HelpConfig) {
+	names := visibleSubcommandNames(config.SubCommands)
+	if len(names) == 0 {
+		return
+	}
+	b.WriteString("## Commands\n\n")
+	for _, name := range names {
+		info := config.SubCommands[name]
+		b.WriteString("### `")
+		b.WriteString(name)
+		b.WriteString("`\n\n")
+		if info.Description != "" {
+			b.WriteString(info.Description)
+			b.WriteString("\n\n")
+		}
+		if len(info.Aliases) > 0 {
+			b.WriteString("**Aliases**: ")
+			b.WriteString(agentBacktickList(info.Aliases))
+			b.WriteString("\n\n")
+		}
+		if info.Agent.Summary != "" {
+			b.WriteString(info.Agent.Summary)
+			b.WriteString("\n\n")
+		}
+		b.WriteString(fmt.Sprintf("Run `%s %s --help-agent` for command-specific context.\n\n", config.Command.Name, name))
+	}
+}
+
+func renderAgentGroupsSection(b *strings.Builder, config HelpConfig) {
+	names := visibleGroupNames(config.Groups)
+	if len(names) == 0 {
+		return
+	}
+	b.WriteString("## Command Groups\n\n")
+	for _, name := range names {
+		info := config.Groups[name]
+		b.WriteString("### `")
+		b.WriteString(name)
+		b.WriteString("`\n\n")
+		if info.Description != "" {
+			b.WriteString(info.Description)
+			b.WriteString("\n\n")
+		}
+		if info.Agent.Summary != "" {
+			b.WriteString(info.Agent.Summary)
+			b.WriteString("\n\n")
+		}
+		b.WriteString(fmt.Sprintf("Run `%s %s --help-agent` for group-specific context.\n\n", config.Command.Name, name))
+	}
+}
+
+func renderAgentGroupCommandsSection(b *strings.Builder, config HelpConfig, group GroupInfo, groupName string) {
+	names := visibleSubcommandNames(group.Commands)
+	if len(names) == 0 {
+		return
+	}
+	b.WriteString("## Commands\n\n")
+	for _, name := range names {
+		info := group.Commands[name]
+		b.WriteString("### `")
+		b.WriteString(groupName)
+		b.WriteString(" ")
+		b.WriteString(name)
+		b.WriteString("`\n\n")
+		if info.Description != "" {
+			b.WriteString(info.Description)
+			b.WriteString("\n\n")
+		}
+		if len(info.Aliases) > 0 {
+			b.WriteString("**Aliases**: ")
+			b.WriteString(agentBacktickList(info.Aliases))
+			b.WriteString("\n\n")
+		}
+		if info.Agent.Summary != "" {
+			b.WriteString(info.Agent.Summary)
+			b.WriteString("\n\n")
+		}
+		b.WriteString(fmt.Sprintf("Run `%s %s %s --help-agent` for command-specific context.\n\n", config.Command.Name, groupName, name))
+	}
+}
+
+func renderAgentExamplesSection(b *strings.Builder, examples []string) {
+	if len(examples) == 0 {
+		return
+	}
+	b.WriteString("## Examples\n\n")
+	for _, example := range examples {
+		example = strings.TrimSpace(example)
+		if example == "" {
+			continue
+		}
+		b.WriteString("```\n")
+		b.WriteString(example)
+		b.WriteString("\n```\n\n")
+	}
+}
+
+func renderAgentSafetySection(b *strings.Builder, notes []string) {
+	if len(notes) == 0 {
+		return
+	}
+	b.WriteString("## Safety Notes\n\n")
+	renderAgentList(b, notes)
+	b.WriteString("\n")
+}
+
+func agentBacktickList(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		quoted = append(quoted, fmt.Sprintf("`%s`", value))
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func agentArgUsage(arg argInfo) string {
+	name := strings.ToUpper(arg.Name)
+	if arg.Variadic {
+		if arg.MinCount > 0 {
+			return fmt.Sprintf("<%s...>", name)
+		}
+		return fmt.Sprintf("[%s...]", name)
+	}
+	if arg.Required {
+		return fmt.Sprintf("<%s>", name)
+	}
+	return fmt.Sprintf("[%s]", name)
+}
+
+func agentFlagInfo(schema any) []flagInfo {
+	t := agentSchemaType(schema)
+	if t == nil {
+		return nil
+	}
+	return extractFlagInfo(t)
+}
+
+func agentArgsInfo(schema any) []argInfo {
+	t := agentSchemaType(schema)
+	if t == nil {
+		return nil
+	}
+	return extractArgsInfo(t)
+}
+
+func agentSchemaType(schema any) reflect.Type {
+	if schema == nil {
+		return nil
+	}
+	t := reflect.TypeOf(schema)
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	return t
 }
 
 // GenerateGlobalHelpLLM generates LLM-optimized help for the entire CLI as structured markdown.

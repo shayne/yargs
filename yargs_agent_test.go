@@ -248,6 +248,163 @@ func TestGenerateAgentHelpUnknownTargets(t *testing.T) {
 	mustContain(t, output, "Unknown command: deploy.", "Run `testcli --help-agent` to inspect available commands.")
 }
 
+func TestGenerateAgentHelpHiddenTargetsAreUnknown(t *testing.T) {
+	config := HelpConfig{
+		Command: CommandInfo{Name: "testcli"},
+		SubCommands: map[string]SubCommandInfo{
+			"secret": {
+				Name:        "secret",
+				Description: "Hidden flat description",
+				Aliases:     []string{"sec"},
+				Hidden:      true,
+			},
+		},
+		Groups: map[string]GroupInfo{
+			"admin": {
+				Name:        "admin",
+				Description: "Hidden group description",
+				Hidden:      true,
+				Commands: map[string]SubCommandInfo{
+					"wipe": {
+						Name:        "wipe",
+						Description: "Hidden group child description",
+					},
+				},
+			},
+			"docker": {
+				Name:        "docker",
+				Description: "Docker commands",
+				Commands: map[string]SubCommandInfo{
+					"hidden": {
+						Name:        "hidden",
+						Description: "Hidden grouped command description",
+						Aliases:     []string{"hid"},
+						Hidden:      true,
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name string
+		path []string
+		desc string
+	}{
+		{name: "hidden flat", path: []string{"secret"}, desc: "Hidden flat description"},
+		{name: "hidden flat alias", path: []string{"sec"}, desc: "Hidden flat description"},
+		{name: "hidden group", path: []string{"admin"}, desc: "Hidden group description"},
+		{name: "child inside hidden group", path: []string{"admin", "wipe"}, desc: "Hidden group child description"},
+		{name: "hidden grouped child", path: []string{"docker", "hidden"}, desc: "Hidden grouped command description"},
+		{name: "hidden grouped child alias", path: []string{"docker", "hid"}, desc: "Hidden grouped command description"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output := GenerateAgentHelpForCommand(config, tt.path, struct{}{}, struct{}{}, struct{}{})
+			mustContain(t, output, "Unknown command: "+strings.Join(tt.path, " ")+".", "Run `testcli --help-agent` to inspect available commands.")
+			mustNotContain(t, output, tt.desc)
+		})
+	}
+
+	reg := Registry{
+		Command: config.Command,
+		SubCommands: map[string]CommandSpec{
+			"secret": {Info: config.SubCommands["secret"]},
+		},
+		Groups: map[string]GroupSpec{
+			"admin": {
+				Info: GroupInfo{
+					Name:        "admin",
+					Description: "Hidden registry group description",
+					Hidden:      true,
+				},
+				Commands: map[string]CommandSpec{
+					"wipe": {Info: SubCommandInfo{Name: "wipe", Description: "Hidden registry child description"}},
+				},
+			},
+		},
+	}
+	output := GenerateAgentHelpFromRegistry(reg, []string{"admin", "wipe"}, struct{}{})
+	mustContain(t, output, "Unknown command: admin wipe.")
+	mustNotContain(t, output, "Hidden registry child description")
+}
+
+func TestGenerateAgentHelpIncludesInheritedSafety(t *testing.T) {
+	config := HelpConfig{
+		Command: CommandInfo{
+			Name: "testcli",
+			Agent: AgentInfo{
+				Safety: []string{"Global safety guidance."},
+			},
+		},
+		SubCommands: map[string]SubCommandInfo{
+			"remove": {
+				Name: "remove",
+				Agent: AgentInfo{
+					Safety: []string{"Command safety guidance."},
+				},
+			},
+		},
+		Groups: map[string]GroupInfo{
+			"docker": {
+				Name: "docker",
+				Agent: AgentInfo{
+					Safety: []string{"Group safety guidance."},
+				},
+				Commands: map[string]SubCommandInfo{
+					"prune": {
+						Name: "prune",
+						Agent: AgentInfo{
+							Safety: []string{"Grouped command safety guidance."},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	commandOutput := GenerateAgentHelpForCommand(config, []string{"remove"}, struct{}{}, struct{}{}, struct{}{})
+	mustContain(t, commandOutput,
+		"## Safety Notes",
+		"Global safety guidance.",
+		"Command safety guidance.",
+	)
+
+	groupOutput := GenerateAgentHelpForCommand(config, []string{"docker"}, struct{}{}, struct{}{}, struct{}{})
+	mustContain(t, groupOutput,
+		"## Safety Notes",
+		"Global safety guidance.",
+		"Group safety guidance.",
+	)
+
+	groupCommandOutput := GenerateAgentHelpForCommand(config, []string{"docker", "prune"}, struct{}{}, struct{}{}, struct{}{})
+	mustContain(t, groupCommandOutput,
+		"## Safety Notes",
+		"Global safety guidance.",
+		"Group safety guidance.",
+		"Grouped command safety guidance.",
+	)
+}
+
+func TestGenerateAgentHelpExplicitUsageDoesNotDuplicateArgs(t *testing.T) {
+	type RunArgs struct {
+		Service string `pos:"0" help:"Service name"`
+	}
+	config := HelpConfig{
+		Command: CommandInfo{Name: "testcli"},
+		SubCommands: map[string]SubCommandInfo{
+			"run": {
+				Name:  "run",
+				Usage: "SERVICE [--detach]",
+			},
+		},
+	}
+
+	output := GenerateAgentHelpForCommand(config, []string{"run"}, struct{}{}, struct{}{}, RunArgs{})
+	mustContain(t, output, "testcli [GLOBAL_OPTIONS] run SERVICE [--detach]")
+	mustNotContain(t, output, "<SERVICE> [OPTIONS] SERVICE")
+}
+
 func TestVariadicArgsInAgentHelp(t *testing.T) {
 	type StartArgs struct {
 		Services []string `pos:"0+" help:"Service names to start"`

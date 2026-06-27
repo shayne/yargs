@@ -5,6 +5,7 @@
 package yargs
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -418,6 +419,147 @@ func TestVariadicArgsInAgentHelp(t *testing.T) {
 
 	output := GenerateAgentHelpForCommand(config, []string{"start"}, struct{}{}, struct{}{}, StartArgs{})
 	mustContain(t, output, "<SERVICES...>", "- **Variadic**: true (minimum: 1)")
+}
+
+func TestErrHelpAgent(t *testing.T) {
+	type GlobalFlags struct {
+		Verbose bool   `flag:"verbose" help:"Enable verbose output"`
+		Config  string `flag:"config" help:"Config path"`
+	}
+	type RunFlags struct {
+		Detach bool `flag:"detach" help:"Run in background"`
+	}
+	type RunArgs struct {
+		Service string `pos:"0" help:"Service name"`
+	}
+
+	config := HelpConfig{
+		Command: CommandInfo{
+			Name:        "testcli",
+			Description: "Test CLI",
+			Agent: AgentInfo{
+				Summary: "Operate test services.",
+			},
+		},
+		SubCommands: map[string]SubCommandInfo{
+			"run": {
+				Name:        "run",
+				Description: "Run a service",
+				Agent: AgentInfo{
+					Summary: "Start service runtime.",
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "global agent help",
+			args: []string{"--help-agent"},
+			want: []string{"# testcli Agent Context", "Operate test services."},
+		},
+		{
+			name: "global agent help after global flag",
+			args: []string{"--verbose", "--help-agent"},
+			want: []string{"# testcli Agent Context", "Operate test services."},
+		},
+		{
+			name: "global agent help after value-taking global flag",
+			args: []string{"--config", "prod.yaml", "--help-agent"},
+			want: []string{"# testcli Agent Context", "Operate test services."},
+		},
+		{
+			name: "flat command agent help",
+			args: []string{"run", "--help-agent"},
+			want: []string{"# testcli run Agent Context", "Start service runtime.", "### `--detach`", "### `SERVICE`"},
+		},
+		{
+			name: "flat command agent help after global flag",
+			args: []string{"--verbose", "run", "--help-agent"},
+			want: []string{"# testcli run Agent Context", "Start service runtime.", "### `--detach`", "### `SERVICE`"},
+		},
+		{
+			name: "flat command agent help after value-taking global flag",
+			args: []string{"--config", "prod.yaml", "run", "--help-agent"},
+			want: []string{"# testcli run Agent Context", "Start service runtime.", "### `--detach`", "### `SERVICE`"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ParseWithCommandAndHelp[GlobalFlags, RunFlags, RunArgs](tt.args, config)
+			if !errors.Is(err, ErrHelpAgent) {
+				t.Fatalf("ParseWithCommandAndHelp error = %v, want ErrHelpAgent", err)
+			}
+			if result == nil {
+				t.Fatal("ParseWithCommandAndHelp result is nil")
+			}
+			mustContain(t, result.HelpText, tt.want...)
+			mustNotContain(t, result.HelpText, "USAGE:", "--help-llm", "Unknown command: prod.yaml")
+		})
+	}
+}
+
+func TestParseAndHandleHelpAgentReturnsErrShown(t *testing.T) {
+	type GlobalFlags struct{}
+	type RunFlags struct {
+		Detach bool `flag:"detach" help:"Run in background"`
+	}
+	type RunArgs struct {
+		Service string `pos:"0" help:"Service name"`
+	}
+
+	config := HelpConfig{
+		Command: CommandInfo{Name: "testcli"},
+		SubCommands: map[string]SubCommandInfo{
+			"run": {
+				Name:        "run",
+				Description: "Run a service",
+				Agent: AgentInfo{
+					Summary: "Start service runtime.",
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "global agent help",
+			args: []string{"--help-agent"},
+			want: []string{"# testcli Agent Context"},
+		},
+		{
+			name: "flat command agent help",
+			args: []string{"run", "--help-agent"},
+			want: []string{"# testcli run Agent Context", "Start service runtime."},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var result *TypedParseResult[GlobalFlags, RunFlags, RunArgs]
+			var err error
+			output := captureStdout(t, func() {
+				result, err = ParseAndHandleHelp[GlobalFlags, RunFlags, RunArgs](tt.args, config)
+			})
+			if !errors.Is(err, ErrShown) {
+				t.Fatalf("ParseAndHandleHelp error = %v, want ErrShown", err)
+			}
+			if result != nil {
+				t.Fatalf("ParseAndHandleHelp result = %#v, want nil", result)
+			}
+			mustContain(t, output, tt.want...)
+			mustNotContain(t, output, "USAGE:")
+		})
+	}
 }
 
 func mustContain(t *testing.T, output string, values ...string) {

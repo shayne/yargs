@@ -2784,16 +2784,18 @@ type TypedParseResult[G any, S any, A any] struct {
 }
 
 // ParseWithCommandAndHelp parses command-line arguments with automatic help generation.
-// If help is requested (via --help, -h, or help subcommand), it generates the help text
-// and returns it in the HelpText field along with the appropriate error (ErrHelp or ErrSubCommandHelp).
+// If help is requested (via --help, -h, help subcommand, or --help-agent), it generates
+// the help text and returns it in the HelpText field along with the appropriate error.
 func ParseWithCommandAndHelp[G any, S any, A any](args []string, config HelpConfig) (*TypedParseResult[G, S, A], error) {
 	var globalFlags G
 	var subCmdFlags S
 	var argsStruct A
 
-	// Check for help flags before parsing
+	// Check for help flags before parsing.
 	if len(args) > 0 {
 		args = ApplyAliases(args, config)
+		globalFlagTypes := extractFlagTypes(reflect.ValueOf(globalFlags))
+		agentArgs := agentHelpTargetArgs(args, config, globalFlagTypes)
 
 		// Check for "help SUBCOMMAND" pattern first (more specific)
 		if args[0] == helpCommand && len(args) > 1 {
@@ -2804,7 +2806,21 @@ func ParseWithCommandAndHelp[G any, S any, A any](args []string, config HelpConf
 			}, ErrSubCommandHelp
 		}
 
-		// Check for global help
+		// Check for global agent help.
+		if args[0] == helpFlagAgent {
+			helpText := GenerateAgentHelp(config, globalFlags)
+			return &TypedParseResult[G, S, A]{
+				HelpText: helpText,
+			}, ErrHelpAgent
+		}
+		if agentHelpWithNoCommandTarget(agentArgs) {
+			helpText := GenerateAgentHelp(config, globalFlags)
+			return &TypedParseResult[G, S, A]{
+				HelpText: helpText,
+			}, ErrHelpAgent
+		}
+
+		// Check for global human help.
 		if args[0] == helpCommand || args[0] == helpFlagLong || args[0] == helpFlagShort {
 			helpText := GenerateGlobalHelp(config, globalFlags)
 			return &TypedParseResult[G, S, A]{
@@ -2823,14 +2839,20 @@ func ParseWithCommandAndHelp[G any, S any, A any](args []string, config HelpConf
 				}
 			}
 
-			// Check if help is requested for this subcommand
-			for i := 1; i < len(args); i++ {
-				if args[i] == helpFlagLong || args[i] == helpFlagShort {
-					helpText := GenerateSubCommandHelp(config, subCmdName, globalFlags, subCmdFlags, argsStruct)
-					return &TypedParseResult[G, S, A]{
-						HelpText: helpText,
-					}, ErrSubCommandHelp
-				}
+			// Check if help is requested for this subcommand.
+			help, agentHelp := helpFlagsInArgs(args[1:])
+			if agentHelp {
+				subCmdName = ExtractSubcommand(agentArgs)
+				helpText := GenerateAgentHelpForCommand(config, []string{subCmdName}, globalFlags, subCmdFlags, argsStruct)
+				return &TypedParseResult[G, S, A]{
+					HelpText: helpText,
+				}, ErrHelpAgent
+			}
+			if help {
+				helpText := GenerateSubCommandHelp(config, subCmdName, globalFlags, subCmdFlags, argsStruct)
+				return &TypedParseResult[G, S, A]{
+					HelpText: helpText,
+				}, ErrSubCommandHelp
 			}
 		}
 	}
@@ -2885,7 +2907,7 @@ func ResolveCommand(args []string, config HelpConfig) (ResolvedCommand, bool, er
 	if len(args) == 0 {
 		return ResolvedCommand{}, false, nil
 	}
-	if args[0] == helpCommand || args[0] == helpFlagLong || args[0] == helpFlagShort {
+	if args[0] == helpCommand || args[0] == helpFlagLong || args[0] == helpFlagShort || args[0] == helpFlagAgent {
 		return ResolvedCommand{}, false, nil
 	}
 	args = ApplyAliases(args, config)
@@ -2939,28 +2961,49 @@ func ResolveCommandWithRegistry(args []string, reg Registry) (ResolvedCommand, b
 // It receives the original args (including the subcommand name) and returns an error if the command fails.
 type SubcommandHandler func(context.Context, []string) error
 
-// isHelpFlag returns true if the argument is a help request.
+// isHelpFlag returns true if the argument is a human-readable help request.
 func isHelpFlag(arg string) bool {
 	return arg == helpCommand || arg == helpFlagLong || arg == helpFlagShort
 }
 
-func helpFlagsInArgs(args []string) bool {
+func helpFlagsInArgs(args []string) (help bool, agentHelp bool) {
 	for _, arg := range args {
 		if arg == helpFlagLong || arg == helpFlagShort {
-			return true
+			help = true
+		}
+		if arg == helpFlagAgent {
+			agentHelp = true
 		}
 	}
-	return false
+	return help, agentHelp
 }
 
-func groupedHelpTargets(args []string) (groupHelp bool, commandHelp bool) {
+func groupedHelpTargets(args []string) (groupHelp bool, groupAgentHelp bool, commandHelp bool, commandAgentHelp bool) {
 	indices := findNonFlagArgs(args)
 	if len(indices) < 2 {
-		return helpFlagsInArgs(args), false
+		groupHelp, groupAgentHelp = helpFlagsInArgs(args)
+		return groupHelp, groupAgentHelp, false, false
 	}
-	groupHelp = helpFlagsInArgs(args[indices[0]+1 : indices[1]])
-	commandHelp = helpFlagsInArgs(args[indices[1]+1:])
-	return groupHelp, commandHelp
+	groupHelp, groupAgentHelp = helpFlagsInArgs(args[indices[0]+1 : indices[1]])
+	commandHelp, commandAgentHelp = helpFlagsInArgs(args[indices[1]+1:])
+	return groupHelp, groupAgentHelp, commandHelp, commandAgentHelp
+}
+
+func agentHelpTargetArgs(args []string, config HelpConfig, globalFlagTypes map[string]reflect.Kind) []string {
+	specs := make(map[string]ConsumeSpec, len(globalFlagTypes))
+	for name, kind := range globalFlagTypes {
+		specs[name] = ConsumeSpec{Kind: kind}
+	}
+	remaining, _ := ConsumeFlagsBySpec(args, specs)
+	return ApplyAliases(remaining, config)
+}
+
+func agentHelpWithNoCommandTarget(args []string) bool {
+	_, agentHelp := helpFlagsInArgs(args)
+	if !agentHelp {
+		return false
+	}
+	return len(findNonFlagArgs(args)) == 0
 }
 
 // stripFirstNonFlagArg removes the first non-flag argument from args.
@@ -3046,14 +3089,26 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 		fmt.Print(GenerateGlobalHelp(config, globalFlagsExample))
 		return nil
 	}
+	if args[0] == helpFlagAgent {
+		fmt.Print(GenerateAgentHelp(config, globalFlagsExample))
+		return nil
+	}
 
 	args = ApplyAliases(args, config)
+	agentArgs := agentHelpTargetArgs(args, config, extractFlagTypes(reflect.ValueOf(globalFlagsExample)))
+	if agentHelpWithNoCommandTarget(agentArgs) {
+		fmt.Print(GenerateAgentHelp(config, globalFlagsExample))
+		return nil
+	}
 
 	// Validate no conflicts between flat commands and groups
 	for groupName := range groups {
 		if _, exists := commands[groupName]; exists {
 			panic(fmt.Sprintf("command name %q conflicts with group name", groupName))
 		}
+	}
+	if handled, err := handleAgentHelpWithGroups(agentArgs, config, globalFlagsExample, commands, groups); handled {
+		return err
 	}
 
 	// Extract potential group and subcommand
@@ -3069,7 +3124,11 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 	if first != "" && second != "" {
 		// Check if first arg is a group
 		if grp, isGroup := groups[first]; isGroup {
-			groupHelp, commandHelp := groupedHelpTargets(args)
+			groupHelp, groupAgentHelp, commandHelp, commandAgentHelp := groupedHelpTargets(args)
+			if groupAgentHelp {
+				fmt.Print(GenerateAgentHelpForCommand(config, []string{first}, globalFlagsExample, struct{}{}, struct{}{}))
+				return nil
+			}
 			if groupHelp {
 				fmt.Print(GenerateGroupHelp(config, first, globalFlagsExample))
 				return nil
@@ -3081,6 +3140,10 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 			}
 			if commandHelp {
 				fmt.Print(GenerateGroupCommandHelp(config, first, second, globalFlagsExample))
+				return nil
+			}
+			if commandAgentHelp {
+				fmt.Print(GenerateAgentHelpForCommand(config, []string{first, second}, globalFlagsExample, struct{}{}, struct{}{}))
 				return nil
 			}
 			// Strip the group name from args before passing to handler
@@ -3100,6 +3163,11 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 
 	// Check if it's a group (show group help)
 	if _, isGroup := groups[cmdName]; isGroup {
+		_, agentHelp := helpFlagsInArgs(args)
+		if agentHelp {
+			fmt.Print(GenerateAgentHelpForCommand(config, []string{cmdName}, globalFlagsExample, struct{}{}, struct{}{}))
+			return nil
+		}
 		fmt.Print(GenerateGroupHelp(config, cmdName, globalFlagsExample))
 		return nil
 	}
@@ -3109,11 +3177,59 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 	if !ok {
 		return fmt.Errorf("unknown command: %s\nRun '%s --help' for usage", cmdName, config.Command.Name)
 	}
-	if helpFlagsInArgs(args) {
+	help, agentHelp := helpFlagsInArgs(args)
+	if agentHelp {
+		fmt.Print(GenerateAgentHelpForCommand(config, []string{cmdName}, globalFlagsExample, struct{}{}, struct{}{}))
+		return nil
+	}
+	if help {
 		fmt.Print(GenerateSubCommandHelpFromConfig(config, cmdName, globalFlagsExample))
 		return nil
 	}
 	return handler(ctx, args)
+}
+
+func handleAgentHelpWithGroups[G any](args []string, config HelpConfig, globalFlagsExample G, commands map[string]SubcommandHandler, groups map[string]Group) (bool, error) {
+	_, agentHelp := helpFlagsInArgs(args)
+	if !agentHelp {
+		return false, nil
+	}
+	if agentHelpWithNoCommandTarget(args) {
+		fmt.Print(GenerateAgentHelp(config, globalFlagsExample))
+		return true, nil
+	}
+
+	first, second := ExtractGroupAndSubcommand(args)
+	if first != "" && second != "" {
+		if grp, isGroup := groups[first]; isGroup {
+			_, groupAgentHelp, _, commandAgentHelp := groupedHelpTargets(args)
+			if groupAgentHelp {
+				fmt.Print(GenerateAgentHelpForCommand(config, []string{first}, globalFlagsExample, struct{}{}, struct{}{}))
+				return true, nil
+			}
+			if _, ok := grp.Commands[second]; !ok {
+				return true, fmt.Errorf("unknown command in group '%s': %s\nRun '%s %s' for usage", first, second, config.Command.Name, first)
+			}
+			if commandAgentHelp {
+				fmt.Print(GenerateAgentHelpForCommand(config, []string{first, second}, globalFlagsExample, struct{}{}, struct{}{}))
+				return true, nil
+			}
+		}
+	}
+
+	cmdName := first
+	if cmdName == "" {
+		cmdName = second
+	}
+	if _, isGroup := groups[cmdName]; isGroup {
+		fmt.Print(GenerateAgentHelpForCommand(config, []string{cmdName}, globalFlagsExample, struct{}{}, struct{}{}))
+		return true, nil
+	}
+	if _, ok := commands[cmdName]; !ok {
+		return true, fmt.Errorf("unknown command: %s\nRun '%s --help' for usage", cmdName, config.Command.Name)
+	}
+	fmt.Print(GenerateAgentHelpForCommand(config, []string{cmdName}, globalFlagsExample, struct{}{}, struct{}{}))
+	return true, nil
 }
 
 // isVerboseEnabled checks if verbose mode is enabled by looking for a "Verbose" field in the global flags struct.

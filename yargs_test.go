@@ -399,6 +399,132 @@ func TestRunSubcommandsWithGroups_GroupSubcommandHelpLLM(t *testing.T) {
 	}
 }
 
+func TestRunSubcommandsWithGroupsHandlesAgentHelp(t *testing.T) {
+	type GlobalFlags struct {
+		Verbose bool   `flag:"verbose" help:"Enable verbose output"`
+		Config  string `flag:"config" help:"Config path"`
+	}
+
+	config := HelpConfig{
+		Command: CommandInfo{
+			Name:        "testcli",
+			Description: "Test CLI",
+			Agent: AgentInfo{
+				Summary: "Operate test services.",
+			},
+		},
+		SubCommands: map[string]SubCommandInfo{
+			"status": {
+				Name:        "status",
+				Description: "Show status",
+				Agent: AgentInfo{
+					Summary: "Inspect service status.",
+				},
+			},
+		},
+		Groups: map[string]GroupInfo{
+			"docker": {
+				Name:        "docker",
+				Description: "Docker commands",
+				Agent: AgentInfo{
+					Summary: "Manage Docker resources.",
+				},
+				Commands: map[string]SubCommandInfo{
+					"run": {
+						Name:        "run",
+						Description: "Run a container",
+						Agent: AgentInfo{
+							Summary: "Start a Docker container.",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	var calls []string
+	commands := map[string]SubcommandHandler{
+		"status": func(ctx context.Context, args []string) error {
+			calls = append(calls, "status")
+			return nil
+		},
+	}
+	groups := map[string]Group{
+		"docker": {
+			Commands: map[string]SubcommandHandler{
+				"run": func(ctx context.Context, args []string) error {
+					calls = append(calls, "docker.run")
+					return nil
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "global agent help",
+			args: []string{"--help-agent"},
+			want: []string{"# testcli Agent Context", "Operate test services."},
+		},
+		{
+			name: "global agent help after global flag",
+			args: []string{"--verbose", "--help-agent"},
+			want: []string{"# testcli Agent Context", "Operate test services."},
+		},
+		{
+			name: "global agent help after value-taking global flag",
+			args: []string{"--config", "prod.yaml", "--help-agent"},
+			want: []string{"# testcli Agent Context", "Operate test services."},
+		},
+		{
+			name: "flat command agent help",
+			args: []string{"status", "--help-agent"},
+			want: []string{"# testcli status Agent Context", "Inspect service status."},
+		},
+		{
+			name: "flat command agent help after value-taking global flag",
+			args: []string{"--config", "prod.yaml", "status", "--help-agent"},
+			want: []string{"# testcli status Agent Context", "Inspect service status."},
+		},
+		{
+			name: "group agent help",
+			args: []string{"docker", "--help-agent"},
+			want: []string{"# testcli docker Agent Context", "Manage Docker resources."},
+		},
+		{
+			name: "group command agent help",
+			args: []string{"docker", "run", "--help-agent"},
+			want: []string{"# testcli docker run Agent Context", "Start a Docker container."},
+		},
+		{
+			name: "group command agent help after value-taking global flag",
+			args: []string{"--config", "prod.yaml", "docker", "run", "--help-agent"},
+			want: []string{"# testcli docker run Agent Context", "Start a Docker container."},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls = nil
+			output := captureStdout(t, func() {
+				if err := RunSubcommandsWithGroups(context.Background(), tt.args, config, GlobalFlags{}, commands, groups); err != nil {
+					t.Fatalf("RunSubcommandsWithGroups returned error: %v", err)
+				}
+			})
+
+			if len(calls) > 0 {
+				t.Fatalf("expected agent help to short-circuit handlers, got calls: %v", calls)
+			}
+			mustContain(t, output, tt.want...)
+			mustNotContain(t, output, "USAGE:", "--help-llm", "Unknown command: prod.yaml")
+		})
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout

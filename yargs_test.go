@@ -1082,6 +1082,26 @@ func TestGenerateGlobalHelp(t *testing.T) {
 	}
 }
 
+func TestGenerateGlobalHelpAdvertisesAgentHelp(t *testing.T) {
+	type GlobalFlags struct {
+		Verbose bool `flag:"verbose" short:"v" help:"Verbose mode"`
+	}
+	config := HelpConfig{
+		Command: CommandInfo{Name: "myapp", Description: "My app"},
+		SubCommands: map[string]SubCommandInfo{
+			"run": {Name: "run", Description: "Run a thing"},
+		},
+	}
+
+	helpText := GenerateGlobalHelp(config, GlobalFlags{})
+	if !strings.Contains(helpText, "--help-agent") {
+		t.Fatalf("human help should advertise --help-agent:\n%s", helpText)
+	}
+	if strings.Contains(helpText, "--help-llm") {
+		t.Fatalf("human help should not advertise --help-llm:\n%s", helpText)
+	}
+}
+
 func TestGenerateSubCommandHelp(t *testing.T) {
 	type GlobalFlags struct {
 		Verbose bool `flag:"v" help:"Verbose mode"`

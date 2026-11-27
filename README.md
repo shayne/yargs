@@ -491,3 +491,13 @@ mise run test
 ## License
 
 MIT. See `LICENSE`.
+
+### Shell completion
+
+Use `HelpConfig.Complete(words, CompletionOptions{...})` from your shell
+adapter. Pass the arguments through the cursor, with an empty final string
+when the cursor follows a space. The result contains one candidate per string.
+Use `CompletionFlags(MyFlags{})` in the flags callback to expose tagged flags.
+The optional argument callback receives the canonical command path, zero-based
+position, and typed prefix. Command aliases and groups use the same metadata
+as help, and hidden commands stay out of suggestions.
